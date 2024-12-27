@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+import optuna
 import pandas as pd
 import numpy as np
 import seaborn as sns
@@ -12,159 +12,243 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy.stats import zscore
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestRegressor
-"""
-# Backward Elimination işlemi için başlangıçta tüm değişkenlerle model oluşturuluyor
-def backward_elimination(X, y, significance_level=0.05):
-    # Başlangıçta X'e sabit terim ekleniyor
-    X_with_intercept = sm.add_constant(X)
-    columns = list(range(X_with_intercept.shape[1]))  # Başlangıçta tüm sütunların indeksleri
-    # İlk modelin kurulması
-    model = sm.OLS(y, X_with_intercept).fit()
-    
-    # P-değerlerini alıyoruz
-    p_values = model.pvalues
-    
-    # Backward elimination: P-değeri en büyük olan değişkeni çıkarıyoruz
-    while max(p_values) > significance_level:
-        max_p_value_index = np.argmax(p_values)  # En yüksek p-değerini bulan index
-        del columns[max_p_value_index] #columns.pop(max_p_value_index)  # O özelliği çıkarıyoruz
-        X_with_intercept =  np.delete(X_with_intercept, max_p_value_index, axis=1)  # En yüksek p-değerine sahip değişkeni çıkarıyoruz
-        model = sm.OLS(y, X_with_intercept).fit()  # Modeli tekrar kuruyoruz
-        p_values = model.pvalues  # Yeni p-değerlerini alıyoruz
-    
-    selected_features = [i - 1 for i in columns if i > 0]
-    print(f"Seçilen sütunlar (0 tabanlı indeksleme): {selected_features}")
-    # Sonuçları döndürüyoruz
-    return model, selected_features
-#Backward elimination X2,X3 ve X5 özelliklerini çıkarttırdı p değerlerinden dolayı ama kalan özelliklerde korelasyon yüksek olarak devam etti. Yani işe yaramadı.
-"""
+#from sklearn.decomposition import PCA
 
-# VIF hesaplama fonksiyonu
+def objective(trial):
+    # Suggest hyperparameters using Optuna
+    n_estimators = trial.suggest_int('n_estimators', 10, 300)
+    max_depth = trial.suggest_int('max_depth', 5, 50, step=5)
+    min_samples_split = trial.suggest_int('min_samples_split', 2, 15)
+    min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 6)
+    max_features = trial.suggest_categorical('max_features', ['sqrt', 'log2', None])
+    # Create the model
+    model = RandomForestRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        max_features=max_features,
+        random_state=42,
+        n_jobs=-1
+    )
+
+    # Evaluate performance using cross-validation
+    model.fit(X_train, y_train.flatten())
+    y_pred = model.predict(X_test)
+    mse = mean_squared_error(y_test, y_pred)
+    
+    return mse  # The objective functon aims to minimize MSE
+
+# Function to calculate VIF
 def calculate_vif(X):
     vif = pd.DataFrame()
     vif["Feature"] = [f"X{i+1}" for i in range(X.shape[1])]
     vif["VIF"] = [variance_inflation_factor(X, i) for i in range(X.shape[1])]
     return vif 
 
-# Veri yükleme
+# Load the data 
 data = pd.read_excel('GR10_Prediction.xlsx', sheet_name='Data')
 
-# Eksik verileri doldur
+# Handle missing values
 imputer = SimpleImputer(missing_values=np.nan, strategy="mean")
 dataArray = data.values
 imputer = imputer.fit(dataArray)
 dataArray = imputer.transform(dataArray)
 dataArray = pd.DataFrame(data=dataArray, columns=data.columns)
 
-# Aykırı Değerleri Tespit Etme ve Temizleme (Z-skoru ile)
-z_scores = np.abs(zscore(dataArray))  # Z-skorunu hesapla
-threshold = 3  # Z-skoru 3'ten büyükse aykırı kabul edilir
+# Detect and clean outliers using Z-score
+z_scores = np.abs(zscore(dataArray))  # Calculate Z-score
+threshold = 3  # Z-score greater than 3 is considered an outlier
 data_no_outliers = dataArray[(z_scores < threshold).all(axis=1)]
 
 
-# Eğitim ve test setlerine ayırma
-y = data_no_outliers.iloc[:, 8:9].values  # Y hedef değişkeni
-X = data_no_outliers.iloc[:, 0:8].values  # X özellikler
+# Split the data into training and testing sets
+y = data_no_outliers.iloc[:, 8:9].values  # Target variable Y
+X = data_no_outliers.iloc[:, 0:8].values  # Features X
 x_train, x_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
 
-# Veriyi standartlaştırma
+# standardize the data 
 sc = StandardScaler()
 X_train = sc.fit_transform(x_train)
 X_test = sc.transform(x_test)
 
-# Korelasyon Matrisini Hesaplama # X Özelliklerinin Korelasyonu
+
+
+# Calculate correlation matrix for X features
 correlation_matrix_x = pd.DataFrame(X, columns=data.columns[:8]).corr()
 plt.figure(figsize=(10, 8))
 sns.heatmap(correlation_matrix_x, annot=True, cmap='coolwarm', fmt='.2f')
-plt.title("X Özelliklerinin Korelasyon Matrisi")
+plt.title("Correlation Matrix of X Features")
 plt.show()
 
-# X Özelliklerinin Y'ye Olan Korelasyonu
+# Correlation between X features and Y 
 y_corr = pd.DataFrame(X, columns=data.columns[:8]).apply(lambda x: np.corrcoef(x, y.flatten())[0, 1])
-print("Y'ye olan korelasyonlar:")
+print("Correlations of features X to Y")
 print(y_corr)
 plt.figure(figsize=(8, 6))
 sns.barplot(x=y_corr.index, y=y_corr.values, palette='viridis', hue=y_corr.index, dodge=False)
-plt.title('X Özelliklerinin Y ile Korelasyonu')
-plt.xlabel('Özellikler')
-plt.ylabel('Korelasyon Katsayısı')
+plt.title('Correlations of features X to Y')
+plt.xlabel('Features')
+plt.ylabel('Correlation Coefficient')
 plt.xticks(rotation=45)
 plt.show()
 
-X_with_intercept = sm.add_constant(X_train)  # Sabit terim ekliyoruz
+regressor = LinearRegression()
+regressor.fit(X_train, y_train)
+
+# Make predictions on the test set
+y_pred = regressor.predict(X_test)
+
+# Calculate performance metrics
+mae = mean_absolute_error(y_test, y_pred)
+mse = mean_squared_error(y_test, y_pred)
+rmse = np.sqrt(mse)
+r2 = r2_score(y_test, y_pred)
+
+# Print results
+print("Multiple Linear Regression")
+print(f"Mean Absolute Error (MAE): {mae}")
+print(f"Mean Squared Error (MSE): {mse}")
+print(f"Root Mean Squared Error (RMSE): {rmse}")
+print(f"R-squared (R²): {r2}")
+
+# Scatter plot to compare actual and predicted values
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, y_pred, color='blue', alpha=0.6, label="Predictions ")
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], color='red', linewidth=2, label="Y = x (Real)")
+plt.title("Real and Predicted Values (Multiple Linear Regression)")
+plt.xlabel("Real Y Values")
+plt.ylabel("Predicted Y Values")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+X_with_intercept = sm.add_constant(X_train)  # Add constant term
 vif_data = calculate_vif(X_with_intercept)
-print("Başlangıç VIF Değerleri:")
+print("Initial VIF values:")
 print(vif_data)
 
-# Orijinal özellik isimlerini başlangıçta al
+# Get original feature names
 original_feature_names = data.columns[:8].tolist()
 
-# VIF eşiği kullanarak yüksek VIF değerine sahip özellikleri çıkar
-vif_threshold = 5  # VIF eşik değeri (genelde 5 veya 10 kullanılır)
+# Remove features with high VIF using a threshold
+vif_threshold = 5  # VIF threshold (commonly 5 or 10)
 while vif_data["VIF"].max() > vif_threshold:
-    max_vif_feature_index = vif_data["VIF"].idxmax()  # En yüksek VIF özelliğinin indeksi
-    max_vif_feature_name = vif_data.loc[max_vif_feature_index, "Feature"]  # Özelliğin ismi (X1, X2 gibi)
+    max_vif_feature_index = vif_data["VIF"].idxmax()  # Index of the highest VIF feature
+    max_vif_feature_name = vif_data.loc[max_vif_feature_index, "Feature"]
 
-    # Orijinal isimden çıkarılan özelliği bul
-    removed_feature_name = original_feature_names[max_vif_feature_index - 1]  # -1 sabit terimi hesaba katmak için
+    # Find the removed feature from the original names
+    removed_feature_name = original_feature_names[max_vif_feature_index - 1]  # -1 to account for constant term
 
-    print(f"\nÇıkarılan Özellik: {removed_feature_name} (VIF: {vif_data['VIF'].max()})")
+    print(f"\nRemoved Feature: {removed_feature_name} (VIF: {vif_data['VIF'].max()})")
 
-    # Özelliği orijinal isimler listesinden kaldır
+    # Remove the feature from the original names list
     original_feature_names.pop(max_vif_feature_index - 1)
 
-    # Özelliği X_train ve X_test'ten kaldır
-    X_train = np.delete(X_train, max_vif_feature_index - 1, axis=1)  # Sabit terimi hesaba katmak için -1
-    X_with_intercept = sm.add_constant(X_train)  # Yeniden sabit terim ekle
+    # Remove the feature from X_traind and X_test
+    X_train = np.delete(X_train, max_vif_feature_index - 1, axis=1)  # -1 to account for constant term
+    X_with_intercept = sm.add_constant(X_train)  # Add constant term again
 
     X_test = np.delete(X_test, max_vif_feature_index - 1, axis=1)
     X_test_with_intercept = sm.add_constant(X_test)
 
-    # Yeni VIF değerlerini hesapla
+    # Revalvulate VIF
     vif_data = calculate_vif(X_with_intercept)
-    print("Güncellenmiş VIF Değerleri:")
+    print("Updated VIF Values:")
     print(vif_data)
 
-# Son haliyle kalan özellikler
-print("\nSon Kalan Özellikler (Orijinal İsimleriyle):")
+# Remaining features after VIF
+print("\nLast Remaining Features (With Their Original Names):")
 print(original_feature_names)
 
 
-# X_train'in kalan sütunlar üzerinden yeniden adlandırılması
+# Rename columns of X_train to the remaining features
 X_train_df_corrected = pd.DataFrame(X_train, columns=original_feature_names)
 
-# Korelasyon matrisi oluşturma ve görselleştirme
+# Create and visualize the correlation matrix after VIF
 correlation_matrix = X_train_df_corrected.corr()
 plt.figure(figsize=(10, 8))
 sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt='.2f')
-plt.title("VIF Sonrası Kalan Özelliklerin Korelasyon Matrisi")
+plt.title("Correlation Matrix of Remaining Features After VIF")
 plt.show()
 
-# Yeni bir model kurma
+# Calculate the correlation between remaining features and Y after VIF
+y_corr_vif = X_train_df_corrected.apply(lambda x: np.corrcoef(x, y_train.flatten())[0, 1])
+plt.figure(figsize=(8, 6))
+sns.barplot(x=y_corr_vif.index, y=y_corr_vif.values, palette='viridis', dodge=False)
+plt.title('Correlations of Remaining Features After VIF to Y', fontsize=14)
+plt.xlabel('Features', fontsize=12)
+plt.ylabel('Correlation Coefficient', fontsize=12)
+plt.xticks(rotation=45)
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# Create a new model
 final_model = sm.OLS(y_train, X_with_intercept).fit()
 print(final_model.summary())
 
-y_pred = final_model.predict(X_test_with_intercept)  # Tahminler
+y_pred = final_model.predict(X_test_with_intercept)   # Predictions
 
-# Model performansını değerlendirme
-mae = mean_absolute_error(y_test, y_pred)  # Ortalama mutlak hata
-mse = mean_squared_error(y_test, y_pred)  # Ortalama kare hata
-r2 = r2_score(y_test, y_pred)  # R^2 skoru
+# Evaluate model performance
+mae = mean_absolute_error(y_test, y_pred)  
+mse = mean_squared_error(y_test, y_pred)  
+rmse = np.sqrt(mse)
+r2 = r2_score(y_test, y_pred)
 
-print(f"Ortalama Mutlak Hata (MAE): {mae}")
-print(f"Ortalama Kare Hata (MSE): {mse}")
-print(f"R^2 Skoru: {r2}")
+print("After VIF Method")
+print(f"Mean Absolute Error (MAE): {mae}")
+print(f"Mean Squared Error (MSE): {mse}")
+print(f"Root Mean Squared Error (RMSE): {rmse}")
+print(f"R-squared (R²): {r2}")
 
-# Gerçek ve tahmin edilen değerleri karşılaştıran scatter plot
+# Scatter plot to compare actual and predicted values after VIF
 plt.figure(figsize=(10, 6))
-plt.scatter(y_test, y_pred, color='blue', alpha=0.6, label="Tahminler")
+plt.scatter(y_test, y_pred, color='blue', alpha=0.6, label="Prediction")
 plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()],
-         color='red', linewidth=2, linestyle='--', label="Y = x (Gerçek)")
-plt.title("Gerçek ve Tahmin Edilen Değerler", fontsize=16)
-plt.xlabel("Gerçek Y Değerleri", fontsize=14)
-plt.ylabel("Tahmin Edilen Y Değerleri", fontsize=14)
+         color='red', linewidth=2, linestyle='--', label="Y = x (Real)")
+plt.title("Real and Predicted Values after VIF", fontsize=16)
+plt.xlabel("Real Y Values", fontsize=14)
+plt.ylabel("Predicted Y Values", fontsize=14)
+plt.legend(fontsize=12)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Start Optuna optimization
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=100, n_jobs=-1)
+
+# Retrieve the best hyperparameters
+best_params = study.best_params
+print("\nBest hyperparameters:", best_params)
+
+# Make predictions with the best model
+best_model = RandomForestRegressor(**best_params, random_state=42)
+best_model.fit(X_train, y_train.flatten())
+y_pred_best = best_model.predict(X_test)
+
+# Performance metrics
+mae_best = mean_absolute_error(y_test, y_pred_best)
+mse_best = mean_squared_error(y_test, y_pred_best)
+rmse_best = np.sqrt(mse_best)
+r2_best = r2_score(y_test, y_pred_best)
+
+print("\nTop Model Performance Metrics:")
+print(f"Mean Absolute Error (MAE): {mae_best}")
+print(f"Mean Squared Error (MSE): {mse_best}")
+print(f"Root Mean Squared Error (RMSE): {rmse_best}")
+print(f"R-squared (R²): {r2_best}")
+
+#  Actual vs Prediction chart
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, y_pred_best, color='green', alpha=0.6, label="Predictions")
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()],
+         color='blue', linewidth=2, linestyle='--', label="Y = x (Real)")
+plt.title("Real and Predicted Values (with Bayesian Optimization)", fontsize=16)
+plt.xlabel("Real Y Values", fontsize=14)
+plt.ylabel("Predicted Y Values", fontsize=14)
 plt.legend(fontsize=12)
 plt.grid(True)
 plt.tight_layout()
@@ -260,13 +344,6 @@ plt.legend()
 plt.grid(True)
 plt.show()
 """
-
-
-
-
-
-
-
 """
 # PCA'yı uygulamak
 pca = PCA(n_components=0.95)  # 0.95, toplam varyansın %95'ini açıklayacak bileşen sayısını seçer
@@ -298,80 +375,32 @@ plt.show()
 
 """
 
-
-
-
-
-
-
-
 """
-#------ VIF KULLANARAK R^2 = 0.76 
-# VIF değerlerini hesapla
-X_with_intercept = sm.add_constant(X_train)  # Sabit terim ekliyoruz
-vif_data = calculate_vif(X_with_intercept)
-print("Başlangıç VIF Değerleri:")
-print(vif_data)
-
-# Yüksek VIF değerine sahip özellikleri çıkarmaya başla
-vif_threshold = 5  # VIF eşik değeri (genelde 5 veya 10 kullanılır)
-while vif_data["VIF"].max() > vif_threshold:
-    max_vif_feature_index = vif_data["VIF"].idxmax()  # En yüksek VIF özelliğinin indeksi
-    max_vif_feature_name = vif_data.loc[max_vif_feature_index, "Feature"]  # Özelliğin ismi
-
-    print(f"\nÇıkarılan Özellik: {max_vif_feature_name}, VIF: {vif_data['VIF'].max()}")
+# Backward Elimination işlemi için başlangıçta tüm değişkenlerle model oluşturuluyor
+def backward_elimination(X, y, significance_level=0.05):
+    # Başlangıçta X'e sabit terim ekleniyor
+    X_with_intercept = sm.add_constant(X)
+    columns = list(range(X_with_intercept.shape[1]))  # Başlangıçta tüm sütunların indeksleri
+    # İlk modelin kurulması
+    model = sm.OLS(y, X_with_intercept).fit()
     
-    # Özelliği X_train'den çıkar
-    X_train = np.delete(X_train, max_vif_feature_index - 1, axis=1)  # Sabit terimi hesaba katmak için -1
-    X_with_intercept = sm.add_constant(X_train)  # Yeniden sabit terim ekle
+    # P-değerlerini alıyoruz
+    p_values = model.pvalues
     
-    X_test = np.delete(X_test, max_vif_feature_index - 1, axis=1)
-    X_test_with_intercept = sm.add_constant(X_test)
+    # Backward elimination: P-değeri en büyük olan değişkeni çıkarıyoruz
+    while max(p_values) > significance_level:
+        max_p_value_index = np.argmax(p_values)  # En yüksek p-değerini bulan index
+        del columns[max_p_value_index] #columns.pop(max_p_value_index)  # O özelliği çıkarıyoruz
+        X_with_intercept =  np.delete(X_with_intercept, max_p_value_index, axis=1)  # En yüksek p-değerine sahip değişkeni çıkarıyoruz
+        model = sm.OLS(y, X_with_intercept).fit()  # Modeli tekrar kuruyoruz
+        p_values = model.pvalues  # Yeni p-değerlerini alıyoruz
     
-    # Yeni VIF değerlerini hesapla
-    vif_data = calculate_vif(X_with_intercept)
-    print("Güncellenmiş VIF Değerleri:")
-    print(vif_data)
-
-# Son haliyle X_train ve VIF tablosu
-print("\nSon Özellik Seti:")
-print(vif_data)
-
-# Yeni bir model kurma
-final_model = sm.OLS(y_train, X_with_intercept).fit()
-print(final_model.summary())
-
-y_pred = final_model.predict(X_test_with_intercept)  # Tahminler
-
-# Model performansını değerlendirme
-mae = mean_absolute_error(y_test, y_pred)  # Ortalama mutlak hata
-mse = mean_squared_error(y_test, y_pred)  # Ortalama kare hata
-r2 = r2_score(y_test, y_pred)  # R^2 skoru
-
-print(f"Ortalama Mutlak Hata (MAE): {mae}")
-print(f"Ortalama Kare Hata (MSE): {mse}")
-print(f"R^2 Skoru: {r2}")
-
-# Gerçek ve tahmin edilen değerleri karşılaştıran scatter plot
-plt.figure(figsize=(10, 6))
-plt.scatter(y_test, y_pred, color='blue', alpha=0.6, label="Tahminler")
-
-# Y = x doğrusu (gerçek ve tahminin eşit olduğu ideal doğrultu)
-plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()],
-         color='red', linewidth=2, linestyle='--', label="Y = x (Gerçek)")
-
-# Başlık, etiketler ve gösterge
-plt.title("Gerçek ve Tahmin Edilen Değerler", fontsize=16)
-plt.xlabel("Gerçek Y Değerleri", fontsize=14)
-plt.ylabel("Tahmin Edilen Y Değerleri", fontsize=14)
-plt.legend(fontsize=12)
-plt.grid(True)
-
-# Görselleştirme
-plt.tight_layout()
-plt.show()
+    selected_features = [i - 1 for i in columns if i > 0]
+    print(f"Seçilen sütunlar (0 tabanlı indeksleme): {selected_features}")
+    # Sonuçları döndürüyoruz
+    return model, selected_features
+#Backward elimination X2,X3 ve X5 özelliklerini çıkarttırdı p değerlerinden dolayı ama kalan özelliklerde korelasyon yüksek olarak devam etti. Yani işe yaramadı.
 """
-
 
 
 """
